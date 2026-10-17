@@ -1,0 +1,17 @@
+name: PvPStyles
+version: 1.0.0
+main: dev.pvpstyles.PvPStyles
+api-version: '1.21'
+description: Duels and queues across many PvP styles
+commands:
+  pvp:
+    description: Open the PvP style menu / manage queue
+    usage: /pvp [list|queue <style>|leave|menu]
+    aliases: [pvps]
+  duel:
+    description: Challenge a player to a duel
+    usage: /duel <player> <style> | /duel accept | /duel deny
+permissions:
+  pvpstyles.bypass:
+    description: Use any command while in a match
+    default: op

@@ -1,0 +1,11 @@
+# Arenas are generated automatically far from spawn and wiped after every match.
+arena:
+  world: ""        # empty = the first (main) world
+  x: 50000
+  z: 50000
+  floor-y: 120
+match:
+  countdown-seconds: 5
+  time-limit-seconds: 300
+  end-delay-seconds: 3
+  boxing-hits-to-win: 100
