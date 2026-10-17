@@ -2,6 +2,7 @@ package dev.pvpstyles;
 
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
@@ -14,7 +15,12 @@ final class Match {
     enum State { COUNTDOWN, ACTIVE, ENDED }
 
     final PvpStyle style;
-    final UUID a, b;
+    final boolean ranked;
+    final UUID a;
+    UUID b;                 // for bot matches this is the bot's entity UUID
+    LivingEntity bot;       // null in player-vs-player matches
+    String botName;
+    BotDifficulty difficulty = BotDifficulty.NORMAL;
     final int slot;
     final World world;
     final int cx, floorY, cz;
@@ -23,8 +29,9 @@ final class Match {
     final Map<UUID, Integer> hits = new HashMap<>();
     final List<BukkitTask> tasks = new ArrayList<>();
 
-    Match(PvpStyle style, UUID a, UUID b, int slot, World world, int cx, int floorY, int cz) {
+    Match(PvpStyle style, UUID a, UUID b, int slot, World world, int cx, int floorY, int cz, boolean ranked) {
         this.style = style;
+        this.ranked = ranked;
         this.a = a;
         this.b = b;
         this.slot = slot;
@@ -34,7 +41,7 @@ final class Match {
         this.cz = cz;
     }
 
-    boolean has(UUID id) { return a.equals(id) || b.equals(id); }
+    boolean has(UUID id) { return a.equals(id) || (b != null && b.equals(id)); }
 
     UUID opponent(UUID id) { return a.equals(id) ? b : a; }
 

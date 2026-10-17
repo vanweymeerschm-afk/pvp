@@ -9,3 +9,17 @@ match:
   time-limit-seconds: 300
   end-delay-seconds: 3
   boxing-hits-to-win: 100
+
+# Hotbar item that opens the PvP style menu when right-clicked.
+lobby-item:
+  give-on-join: true
+  slot: 4                 # hotbar slot 0-8
+  material: NETHER_STAR
+
+ranks:
+  chat-prefix: true       # show [Gold] etc. in front of chat messages
+
+bots:
+  enabled: true
+  default-difficulty: NORMAL   # EASY, NORMAL or HARD
+  queue-fallback-seconds: 15   # if nobody joins your queue, fight a bot after this long (0 = off)

@@ -1,18 +1,21 @@
 package dev.pvpstyles;
 
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Sound;
 import org.bukkit.World;
-import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.entity.Player;
-import org.bukkit.GameMode;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.Mob;
+import org.bukkit.entity.Player;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.util.Vector;
-import net.kyori.adventure.title.Title;
 
 import java.time.Duration;
 import java.util.*;
@@ -23,16 +26,24 @@ public final class MatchManager {
     private record Duel(UUID from, PvpStyle style, long expires) {}
 
     private final PvPStyles plugin;
+    private final KitStore kitStore;
+    private final RankStore ranks;
     private final Map<UUID, Match> inMatch = new HashMap<>();
+    private final Map<UUID, Match> botMatches = new HashMap<>(); // bot entity uuid -> match
     private final Map<PvpStyle, UUID> queue = new EnumMap<>(PvpStyle.class);
     private final Map<UUID, Duel> duels = new HashMap<>();
     private final Set<Integer> usedSlots = new HashSet<>();
 
     private final World world;
     private final int baseX, baseZ, floorY, countdown, timeLimit, endDelay, boxingHits;
+    private final boolean botsEnabled;
+    private final BotDifficulty defaultDifficulty;
+    private final int queueFallback;
 
-    public MatchManager(PvPStyles plugin) {
+    public MatchManager(PvPStyles plugin, KitStore kitStore, RankStore ranks) {
         this.plugin = plugin;
+        this.kitStore = kitStore;
+        this.ranks = ranks;
         FileConfiguration c = plugin.getConfig();
         World w = Bukkit.getWorld(c.getString("arena.world", ""));
         if (w == null) {
@@ -47,11 +58,21 @@ public final class MatchManager {
         this.timeLimit = c.getInt("match.time-limit-seconds", 300);
         this.endDelay = c.getInt("match.end-delay-seconds", 3);
         this.boxingHits = c.getInt("match.boxing-hits-to-win", 100);
+        this.botsEnabled = c.getBoolean("bots.enabled", true);
+        BotDifficulty d = BotDifficulty.parse(c.getString("bots.default-difficulty", "NORMAL"));
+        this.defaultDifficulty = d != null ? d : BotDifficulty.NORMAL;
+        this.queueFallback = c.getInt("bots.queue-fallback-seconds", 15);
     }
 
     // ---------- lookups ----------
 
     Match get(Player p) { return inMatch.get(p.getUniqueId()); }
+
+    /** The match an entity (player or bot) is fighting in, or null. */
+    Match matchOf(Entity e) {
+        if (e instanceof Player p) return inMatch.get(p.getUniqueId());
+        return botMatches.get(e.getUniqueId());
+    }
 
     boolean isArena(org.bukkit.Location l) {
         return l.getWorld() == world && l.getX() >= baseX - 64 && Math.abs(l.getZ() - baseZ) <= 64;
@@ -59,6 +80,12 @@ public final class MatchManager {
 
     private boolean busy(Player p) {
         return inMatch.containsKey(p.getUniqueId()) || queue.containsValue(p.getUniqueId());
+    }
+
+    /** Display name for a combatant (player or bot). */
+    String nameIn(Match m, UUID id) {
+        if (m.bot != null && id.equals(m.b)) return m.botName;
+        return name(id);
     }
 
     // ---------- queue & duels ----------
@@ -71,12 +98,24 @@ public final class MatchManager {
             Player other = Bukkit.getPlayer(waiting);
             if (other != null && other.isOnline() && !inMatch.containsKey(waiting)) {
                 queue.remove(style);
-                start(other, p, style);
+                start(other, p, style, true);
                 return;
             }
         }
         queue.put(style, p.getUniqueId());
-        Msg.send(p, "Queued for <red>" + style.display() + "<gray>. Use <white>/pvp leave<gray> to cancel.");
+        Msg.send(p, "Queued (ranked) for <red>" + style.display() + "<gray>. Use <white>/pvp leave<gray> to cancel.");
+
+        if (botsEnabled && queueFallback > 0) {
+            UUID id = p.getUniqueId();
+            Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                Player pl = Bukkit.getPlayer(id);
+                if (pl != null && id.equals(queue.get(style)) && !inMatch.containsKey(id)) {
+                    queue.remove(style);
+                    Msg.send(pl, "No opponent found - matching you with a bot.");
+                    startBot(pl, style, null);
+                }
+            }, queueFallback * 20L);
+        }
     }
 
     public boolean leaveQueue(Player p) {
@@ -112,7 +151,7 @@ public final class MatchManager {
         if (from == null || busy(from) || busy(target)) {
             Msg.send(target, "<red>That duel can't start right now."); return;
         }
-        start(from, target, d.style());
+        start(from, target, d.style(), false);
     }
 
     public void deny(Player target) {
@@ -125,13 +164,18 @@ public final class MatchManager {
 
     // ---------- match lifecycle ----------
 
-    private void start(Player a, Player b, PvpStyle style) {
-        for (Player p : List.of(a, b)) { leaveQueue(p); duels.remove(p.getUniqueId()); }
-
+    private int allocSlot() {
         int slot = 0;
         while (!usedSlots.add(slot)) slot++;
+        return slot;
+    }
+
+    private void start(Player a, Player b, PvpStyle style, boolean ranked) {
+        for (Player p : List.of(a, b)) { leaveQueue(p); duels.remove(p.getUniqueId()); }
+
+        int slot = allocSlot();
         Match m = new Match(style, a.getUniqueId(), b.getUniqueId(), slot, world,
-                baseX + slot * SLOT_SPACING, floorY, baseZ);
+                baseX + slot * SLOT_SPACING, floorY, baseZ, ranked);
         inMatch.put(a.getUniqueId(), m);
         inMatch.put(b.getUniqueId(), m);
 
@@ -142,9 +186,45 @@ public final class MatchManager {
             m.snapshots.put(p.getUniqueId(), PlayerSnapshot.capture(p));
             prepare(p, style);
             p.teleport(m.spawn(i++ == 0));
-            Msg.send(p, "Starting <red>" + style.display() + "<gray>: " + style.description());
+            Msg.send(p, "Starting <red>" + style.display() + (ranked ? " <gold>(Ranked)" : " <gray>(Unranked)")
+                    + "<gray>: " + style.description());
         }
+        runCountdown(m);
+    }
 
+    /** Starts a fight against an AI bot. difficulty == null uses the config default. */
+    public void startBot(Player p, PvpStyle style, BotDifficulty difficulty) {
+        if (!botsEnabled) { Msg.send(p, "<red>Bots are disabled on this server."); return; }
+        if (inMatch.containsKey(p.getUniqueId())) { Msg.send(p, "<red>You're already in a match."); return; }
+        leaveQueue(p);
+        duels.remove(p.getUniqueId());
+        BotDifficulty diff = difficulty != null ? difficulty : defaultDifficulty;
+
+        int slot = allocSlot();
+        Match m = new Match(style, p.getUniqueId(), null, slot, world,
+                baseX + slot * SLOT_SPACING, floorY, baseZ, false);
+        m.difficulty = diff;
+        inMatch.put(p.getUniqueId(), m);
+
+        ArenaBuilder.build(m);
+
+        m.snapshots.put(p.getUniqueId(), PlayerSnapshot.capture(p));
+        prepare(p, style);
+        p.teleport(m.spawn(true));
+
+        Mob bot = BotFactory.spawn(style, diff, m.spawn(false));
+        m.bot = bot;
+        m.b = bot.getUniqueId();
+        m.botName = "Bot (" + diff.label() + ")";
+        botMatches.put(m.b, m);
+
+        Msg.send(p, "Starting <red>" + style.display() + "<gray> vs <red>" + m.botName
+                + " <gray>(unranked): " + style.description());
+        runCountdown(m);
+    }
+
+    private void runCountdown(Match m) {
+        PvpStyle style = m.style;
         m.tasks.add(new BukkitRunnable() {
             int n = countdown;
             @Override public void run() {
@@ -157,9 +237,28 @@ public final class MatchManager {
                 m.state = Match.State.ACTIVE;
                 titleAll(m, "<green>FIGHT!", "", 2f);
                 m.tasks.add(Bukkit.getScheduler().runTaskLater(plugin, () -> timeout(m), timeLimit * 20L));
+                activateBot(m);
                 cancel();
             }
         }.runTaskTimer(plugin, 0L, 20L));
+    }
+
+    private void activateBot(Match m) {
+        if (m.bot == null) return;
+        Player p = Bukkit.getPlayer(m.a);
+        if (m.bot instanceof Mob mob) {
+            mob.setAI(true);
+            if (p != null) mob.setTarget(p);
+        }
+        m.tasks.add(new BukkitRunnable() {
+            @Override public void run() {
+                if (m.state != Match.State.ACTIVE || m.bot == null || !m.bot.isValid()) { cancel(); return; }
+                Player pl = Bukkit.getPlayer(m.a);
+                if (pl != null && m.bot instanceof Mob mob && mob.getTarget() == null) mob.setTarget(pl);
+                double limit = m.floorY - (m.style == PvpStyle.SUMO ? 1.5 : 10);
+                if (m.bot.getLocation().getY() < limit) end(m, m.a, m.botName + " fell off");
+            }
+        }.runTaskTimer(plugin, 5L, 5L));
     }
 
     private void prepare(Player p, PvpStyle style) {
@@ -182,13 +281,20 @@ public final class MatchManager {
         p.setMaximumNoDamageTicks(style.noHitDelay() ? 0 : 20);
         p.setNoDamageTicks(0);
 
-        Kits.give(p, style);
+        Kits.give(p, style, kitStore.get(p.getUniqueId(), style));
     }
 
-    void registerHit(Match m, Player attacker) {
-        int h = m.hits.merge(attacker.getUniqueId(), 1, Integer::sum);
-        attacker.sendActionBar(Msg.c("<red>Hits: <white>" + h + "<gray>/" + boxingHits));
-        if (h >= boxingHits) end(m, attacker.getUniqueId(), attacker.getName() + " landed " + boxingHits + " hits");
+    void registerHit(Match m, UUID attackerId) {
+        int h = m.hits.merge(attackerId, 1, Integer::sum);
+        Player attacker = Bukkit.getPlayer(attackerId);
+        if (attacker != null) attacker.sendActionBar(Msg.c("<red>Hits: <white>" + h + "<gray>/" + boxingHits));
+        if (h >= boxingHits) end(m, attackerId, nameIn(m, attackerId) + " landed " + boxingHits + " hits");
+    }
+
+    private double healthOf(Match m, UUID id) {
+        if (m.bot != null && id.equals(m.b)) return m.bot.isValid() ? m.bot.getHealth() : 0;
+        Player p = Bukkit.getPlayer(id);
+        return p != null ? p.getHealth() : 0;
     }
 
     private void timeout(Match m) {
@@ -198,11 +304,8 @@ public final class MatchManager {
             int ha = m.hits.getOrDefault(m.a, 0), hb = m.hits.getOrDefault(m.b, 0);
             if (ha > hb) winner = m.a; else if (hb > ha) winner = m.b;
         } else {
-            Player pa = Bukkit.getPlayer(m.a), pb = Bukkit.getPlayer(m.b);
-            if (pa != null && pb != null) {
-                if (pa.getHealth() > pb.getHealth()) winner = m.a;
-                else if (pb.getHealth() > pa.getHealth()) winner = m.b;
-            }
+            double ha = healthOf(m, m.a), hb = healthOf(m, m.b);
+            if (ha > hb) winner = m.a; else if (hb > ha) winner = m.b;
         }
         end(m, winner, "Time limit reached");
     }
@@ -212,7 +315,12 @@ public final class MatchManager {
         m.state = Match.State.ENDED;
         m.cancelTasks();
 
-        String winnerName = winner == null ? null : name(winner);
+        if (m.bot != null && m.bot instanceof Mob mob) {
+            mob.setTarget(null);
+            mob.setAI(false);
+        }
+
+        String winnerName = winner == null ? null : nameIn(m, winner);
         for (UUID id : List.of(m.a, m.b)) {
             Player p = Bukkit.getPlayer(id);
             if (p == null) continue;
@@ -227,6 +335,8 @@ public final class MatchManager {
                 p.showTitle(title("<red>DEFEAT", "<gray>" + reason));
             }
         }
+        if (m.ranked && winner != null) applyRank(m, winner);
+
         // Sumo losers are still falling; bring them back onto the platform while the result shows.
         Bukkit.getScheduler().runTask(plugin, () -> {
             for (UUID id : List.of(m.a, m.b)) {
@@ -242,6 +352,10 @@ public final class MatchManager {
     }
 
     private void cleanup(Match m) {
+        if (m.bot != null) {
+            m.bot.remove();
+            botMatches.remove(m.b);
+        }
         ArenaBuilder.clear(m);
         for (UUID id : List.of(m.a, m.b)) {
             if (inMatch.get(id) != m) continue;
@@ -286,7 +400,13 @@ public final class MatchManager {
             m.cancelTasks();
             cleanup(m);
         }
+        for (Match m : new HashSet<>(botMatches.values())) {
+            m.state = Match.State.ENDED;
+            m.cancelTasks();
+            cleanup(m);
+        }
         inMatch.clear();
+        botMatches.clear();
         queue.clear();
     }
 
@@ -294,7 +414,28 @@ public final class MatchManager {
 
     private String name(UUID id) {
         Player p = Bukkit.getPlayer(id);
-        return p != null ? p.getName() : "Unknown";
+        if (p != null) return p.getName();
+        String n = Bukkit.getOfflinePlayer(id).getName();
+        return n != null ? n : "Unknown";
+    }
+
+    private void applyRank(Match m, UUID winner) {
+        UUID loser = m.opponent(winner);
+        RankStore.Tier before = ranks.tier(ranks.get(winner).rating);
+        int[] d = ranks.record(winner, name(winner), loser, name(loser));
+        RankStore.Stats ws = ranks.get(winner), ls = ranks.get(loser);
+        RankStore.Tier after = ranks.tier(ws.rating);
+
+        Player w = Bukkit.getPlayer(winner), l = Bukkit.getPlayer(loser);
+        if (w != null) {
+            Msg.send(w, "<green>+" + d[0] + " rating <gray>(" + ws.rating + ") " + ranks.tag(winner));
+            if (!after.name().equals(before.name())) {
+                Msg.send(w, "<gold>Rank up! <gray>You are now " + ranks.tag(winner) + "<gray>.");
+            }
+        }
+        if (l != null) {
+            Msg.send(l, "<red>-" + d[1] + " rating <gray>(" + ls.rating + ") " + ranks.tag(loser));
+        }
     }
 
     private static Title title(String main, String sub) {

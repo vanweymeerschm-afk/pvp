@@ -12,12 +12,25 @@ public final class PvPStyles extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        matches = new MatchManager(this);
-        StyleMenu menu = new StyleMenu(matches);
-        getServer().getPluginManager().registerEvents(new CombatListener(matches), this);
-        getServer().getPluginManager().registerEvents(menu, this);
 
-        PvpCommand cmd = new PvpCommand(matches, menu);
+        KitStore kitStore = new KitStore(this);
+        RankStore ranks = new RankStore(this);
+        matches = new MatchManager(this, kitStore, ranks);
+
+        KitPreview preview = new KitPreview();
+        KitEditor editor = new KitEditor(kitStore);
+        StyleMenu menu = new StyleMenu(matches, preview, editor, ranks);
+        LobbyItem lobby = new LobbyItem(this, matches, menu);
+
+        var pm = getServer().getPluginManager();
+        pm.registerEvents(new CombatListener(matches), this);
+        pm.registerEvents(menu, this);
+        pm.registerEvents(preview, this);
+        pm.registerEvents(editor, this);
+        pm.registerEvents(lobby, this);
+        pm.registerEvents(new RankChat(this, ranks), this);
+
+        PvpCommand cmd = new PvpCommand(matches, menu, preview, editor, lobby, ranks);
         for (String name : List.of("pvp", "duel")) {
             PluginCommand c = getCommand(name);
             if (c != null) {

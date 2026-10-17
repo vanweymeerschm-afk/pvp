@@ -3,6 +3,7 @@ package dev.pvpstyles;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
@@ -10,8 +11,10 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityRegainHealthEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
@@ -26,6 +29,7 @@ import org.bukkit.Location;
 
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 
 public final class CombatListener implements Listener {
     private static final Set<String> ALLOWED_COMMANDS = Set.of("pvp", "pvps", "duel", "pvpstyles:pvp", "pvpstyles:duel");
@@ -34,10 +38,10 @@ public final class CombatListener implements Listener {
 
     public CombatListener(MatchManager mm) { this.mm = mm; }
 
-    private static Player attacker(Entity d) {
-        if (d instanceof Player p) return p;
-        if (d instanceof Projectile pr && pr.getShooter() instanceof Player p) return p;
-        return null;
+    /** Who dealt the damage: the shooter for projectiles, otherwise the damager itself. */
+    private static UUID attackerId(Entity d) {
+        if (d instanceof Projectile pr && pr.getShooter() instanceof Entity shooter) return shooter.getUniqueId();
+        return d.getUniqueId();
     }
 
     private static boolean hasTotem(Player p) {
@@ -47,16 +51,22 @@ public final class CombatListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onDamage(EntityDamageEvent e) {
-        if (!(e.getEntity() instanceof Player victim)) return;
-        Match m = mm.get(victim);
+        if (!(e.getEntity() instanceof LivingEntity victim)) return;
+        Match m = mm.matchOf(victim);
         if (m == null) return;
         if (m.state != Match.State.ACTIVE) { e.setCancelled(true); return; }
 
         PvpStyle s = m.style;
-        Player attacker = (e instanceof EntityDamageByEntityEvent be) ? attacker(be.getDamager()) : null;
+        UUID victimId = victim.getUniqueId();
+        UUID attacker = (e instanceof EntityDamageByEntityEvent be) ? attackerId(be.getDamager()) : null;
+
+        // Bot difficulty scales the damage the bot deals.
+        if (attacker != null && m.bot != null && attacker.equals(m.b) && !attacker.equals(victimId)) {
+            e.setDamage(e.getDamage() * m.difficulty.damageMult());
+        }
 
         if (s.noDamage()) {
-            if (attacker != null && !attacker.equals(victim) && m.has(attacker.getUniqueId())) {
+            if (attacker != null && !attacker.equals(victimId) && m.has(attacker)) {
                 e.setDamage(0); // keep knockback, no health loss
                 if (s == PvpStyle.BOXING) mm.registerHit(m, attacker);
             } else {
@@ -66,10 +76,27 @@ public final class CombatListener implements Listener {
         }
 
         // Intercept lethal damage so nobody sees a death screen.
-        if (e.getFinalDamage() >= victim.getHealth() && !hasTotem(victim)) {
+        boolean totem = victim instanceof Player pl && hasTotem(pl);
+        if (e.getFinalDamage() >= victim.getHealth() && !totem) {
             e.setCancelled(true);
-            mm.end(m, m.opponent(victim.getUniqueId()), victim.getName() + " was defeated");
+            mm.end(m, m.opponent(victimId), mm.nameIn(m, victimId) + " was defeated");
         }
+    }
+
+    @EventHandler
+    public void onBotDeath(EntityDeathEvent e) {
+        if (e.getEntity() instanceof Player) return;
+        Match m = mm.matchOf(e.getEntity());
+        if (m == null || m.bot == null) return;
+        e.getDrops().clear();
+        e.setDroppedExp(0);
+        mm.end(m, m.opponent(e.getEntity().getUniqueId()), m.botName + " was defeated");
+    }
+
+    @EventHandler
+    public void onSpawn(CreatureSpawnEvent e) {
+        if (e.getSpawnReason() == CreatureSpawnEvent.SpawnReason.CUSTOM) return;
+        if (mm.isArena(e.getLocation())) e.setCancelled(true); // no zombie reinforcements or natural spawns
     }
 
     @EventHandler(ignoreCancelled = true)
